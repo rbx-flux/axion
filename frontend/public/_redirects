@@ -1,0 +1,5 @@
+# Short links, imported from rbx-flux/orbitroblox-xyz. Served straight from
+# the asset layer (evaluated before the SPA fallback; never reach the Worker).
+/github  https://github.com/janisfox/orbit           302
+/discord https://discord.gg/Vpsyd59r5X               302
+/trello  https://trello.com/b/0i6Ls8oP/orbit-v3      302

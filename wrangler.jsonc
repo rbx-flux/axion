@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "axion",
+  "main": "backend/src/index.ts",
+  "compatibility_date": "2026-09-01",
+
+  "observability": { "enabled": true },
+
+  // Serve the Worker on orbitroblox.xyz. The zone must be on this Cloudflare
+  // account; `wrangler deploy` then creates the DNS record and certificate
+  // itself. The *.workers.dev URL keeps working alongside it.
+  "routes": [{ "pattern": "orbitroblox.xyz", "custom_domain": true }],
+
+  // The licence database. Create it once with
+  //   npx wrangler d1 create axion
+  // and paste the returned database_id below. `vite dev` uses a local
+  // copy; apply the schema to each with
+  //   npx wrangler d1 migrations apply axion --local     (dev)
+  //   npx wrangler d1 migrations apply axion --remote    (production)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "axion",
+      "database_id": "5ad61b51-0baa-413d-9109-e27beda88283",
+      "migrations_dir": "backend/migrations"
+    }
+  ],
+
+  // The Vite-built frontend. `directory` is filled in by the Cloudflare Vite
+  // plugin at build time (it points at the client output under dist/). Only
+  // /api/* invokes the Worker; everything else is served straight from the
+  // asset store, with unknown paths falling back to index.html so the app
+  // can show its own not-found view. Short links live in
+  // frontend/public/_redirects.
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  }
+}

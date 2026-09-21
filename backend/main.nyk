@@ -1,0 +1,301 @@
+local http = require("@neyuki/http")
+local table = require("@neyuki/table")
+local string = require("@neyuki/string")
+local math = require("@neyuki/math")
+local fs = require("@neyuki/fs")
+local sql = require("@neyuki/sql")
+local os = require("@neyuki/os")
+local json = require("@neyuki/json")
+local crypto = require("@neyuki/crypto")
+
+-- CONFIG ---------------------------------------------------------------------
+--
+-- `os.getenv` only exposes an allowlist of variables, so settings live in a
+-- json file next to this script (or in the cwd), e.g.
+--   {
+--     "database": "postgres://user:pass@127.0.0.1:5432/axion",
+--     "secret": "long-random-string-used-by-the-issue-endpoints",
+--     "port": 6767,
+--     "host": "127.0.0.1"
+--   }
+
+local function loadConfig()
+    local candidates = { "backend/config.json", "config.json" }
+    for _, path in candidates do
+        if fs.exists(path) then
+            local file = fs.open(path, "r")
+            local text = file:read()
+            file:close()
+            local config = json.decode(text)
+            if type(config.database) != "string" or string.find(config.database, "postgres", 1, true) != 1 then
+                error(path .. ": `database` must be a postgres:// connection URL")
+            end
+            if type(config.secret) != "string" or #config.secret < 16 then
+                error(path .. ": `secret` must be a string of at least 16 characters")
+            end
+            return config
+        end
+    end
+    error("no config.json found (looked for " .. table.concat(candidates, ", ") .. ")")
+end
+
+local config = loadConfig()
+
+-- DATABASE -------------------------------------------------------------------
+
+local db = sql.connect(config.database)
+
+-- One row per license key. `creator_id` (the Roblox user id) is NULL until
+-- the key is claimed and UNIQUE so each user can own at most one key.
+db:execute([[
+    CREATE TABLE IF NOT EXISTS licenses (
+        key        TEXT   PRIMARY KEY,
+        creator_id BIGINT UNIQUE,
+        created_at BIGINT NOT NULL,
+        claimed_at BIGINT
+    )
+]])
+
+local function findByCreator(conn: Connection, creatorId: number): Row?
+    return conn:queryOne(
+        "SELECT key, created_at, claimed_at FROM licenses WHERE creator_id = $1",
+        { creatorId }
+    )
+end
+
+local function findByKey(conn: Connection, key: string): Row?
+    return conn:queryOne(
+        "SELECT key, creator_id, created_at, claimed_at FROM licenses WHERE key = $1",
+        { key }
+    )
+end
+
+-- HELPERS --------------------------------------------------------------------
+
+local function reply(status: number, body: any)
+    return {
+        status = status,
+        headers = { ["content-type"] = "application/json" },
+        body = json.encode(body)
+    }
+end
+
+local function fail(status: number, message: string)
+    return reply(status, { ok = false, error = message })
+end
+
+-- Merges query parameters with a json body (body wins), so callers can use
+-- either `?creatorId=1` or `{"creatorId": 1}`.
+local function readInput(req: Request, params: {[string]: string}): {[string]: any}
+    local input = {}
+    for k, v in params do input[k] = v end
+
+    local contentType = req:header("content-type") ?? ""
+    if req.body != nil and #req.body > 0 and string.find(contentType, "application/json", 1, true) != nil then
+        local decoded = json.decode(req.body)
+        if type(decoded) == "table" then
+            for k, v in decoded do input[k] = v end
+        end
+    end
+    return input
+end
+
+-- Roblox user ids are positive integers; accept them as numbers or strings.
+local function parseCreatorId(value: any): number?
+    local n = tonumber(value)
+    if n == nil or n <= 0 or n != math.floor(n) then return nil end
+    return n
+end
+
+local function normalizeKey(value: any): string?
+    if type(value) != "string" then return nil end
+    local key = string.upper(value)
+    if #key == 0 or #key > 64 then return nil end
+    return key
+end
+
+-- Keys look like AXION-1A2B3-4C5D6-7E8F9-0A1B2 (20 hex chars, 80 bits).
+local function generateKey(): string
+    local hex = string.upper(crypto.randomBytes(10, "hex"))
+    local groups = {}
+    for i = 1, 20, 5 do
+        table.insert(groups, string.sub(hex, i, i + 4))
+    end
+    return "AXION-" .. table.concat(groups, "-")
+end
+
+-- The issue endpoints need `Authorization: Bearer <config.secret>`.
+local function authorized(req: Request): boolean
+    local header = req:header("authorization")
+    if header == nil then return false end
+    local prefix = "bearer "
+    if string.lower(string.sub(header, 1, #prefix)) != prefix then return false end
+    local token = string.sub(header, #prefix + 1)
+    return crypto.equals(token, config.secret)
+end
+
+-- ROUTES ---------------------------------------------------------------------
+--
+-- Every handler receives (req, input) where `input` is the merged query /
+-- body parameters, and returns a reply table.
+
+local routes = {
+    api = {
+        v1 = {
+            -- GET /api/v1/whitelist?creatorId=123[&licenseKey=AXION-...]
+            -- Does this Roblox user own the product? With `licenseKey` it
+            -- must also be the key bound to that user.
+            whitelist = {
+                GET = function(_req: Request, input: {[string]: any})
+                    local creatorId = parseCreatorId(input.creatorId)
+                    if creatorId == nil then return fail(400, "creatorId must be a positive integer") end
+
+                    local row = findByCreator(db, creatorId)
+                    local owned = row != nil
+
+                    if owned and input.licenseKey != nil then
+                        local key = normalizeKey(input.licenseKey)
+                        owned = key != nil and crypto.equals(key, row.key)
+                    end
+
+                    local claimedAt = nil
+                    if owned then claimedAt = row.claimed_at end
+
+                    return reply(200, {
+                        ok = true,
+                        owned = owned,
+                        creatorId = creatorId,
+                        claimedAt = claimedAt,
+                        timestamp = os.time()
+                    })
+                end
+            },
+
+            -- POST /api/v1/keys/issue   (authorized)
+            -- Mints a fresh, unclaimed license key.
+            keys = {
+                issue = {
+                    POST = function(req: Request, _input: {[string]: any})
+                        if not authorized(req) then return fail(401, "unauthorized") end
+
+                        local now = os.time()
+                        local key = nil
+                        -- Collisions are astronomically unlikely; retry anyway.
+                        for _ = 1, 5 do
+                            local candidate = generateKey()
+                            if findByKey(db, candidate) == nil then
+                                key = candidate
+                                break
+                            end
+                        end
+                        if key == nil then return fail(500, "could not generate a unique key") end
+
+                        db:execute(
+                            "INSERT INTO licenses (key, created_at) VALUES ($1, $2)",
+                            { key, now }
+                        )
+
+                        return reply(201, { ok = true, key = key, createdAt = now })
+                    end
+                }
+            },
+
+            -- POST /api/v1/licenses/issue  { creatorId, licenseKey }   (authorized)
+            -- Binds a key to a Roblox user so they own the product. A key can
+            -- be bound once and a user can hold at most one key.
+            licenses = {
+                issue = {
+                    POST = function(req: Request, input: {[string]: any})
+                        if not authorized(req) then return fail(401, "unauthorized") end
+
+                        local creatorId = parseCreatorId(input.creatorId)
+                        if creatorId == nil then return fail(400, "creatorId must be a positive integer") end
+                        local key = normalizeKey(input.licenseKey)
+                        if key == nil then return fail(400, "licenseKey must be provided") end
+
+                        return db:transaction(function(tx: Connection)
+                            local row = findByKey(tx, key)
+                            if row == nil then return fail(404, "unknown license key") end
+
+                            if row.creator_id != nil then
+                                if row.creator_id == creatorId then
+                                    return reply(200, {
+                                        ok = true, owned = true, alreadyOwned = true,
+                                        key = key, creatorId = creatorId, claimedAt = row.claimed_at
+                                    })
+                                end
+                                return fail(409, "license key is already claimed")
+                            end
+
+                            if findByCreator(tx, creatorId) != nil then
+                                return fail(409, "user already owns a license")
+                            end
+
+                            local now = os.time()
+                            tx:execute(
+                                "UPDATE licenses SET creator_id = $1, claimed_at = $2 WHERE key = $3",
+                                { creatorId, now, key }
+                            )
+
+                            return reply(200, { ok = true, owned = true, key = key, creatorId = creatorId, claimedAt = now })
+                        end)
+                    end
+                }
+            }
+        }
+    }
+}
+
+-- Walks `routes` by path segment and returns the { METHOD = handler } table
+-- at the end, or nil.
+local function resolve(segments: {string}): {[string]: any}?
+    local node = routes
+    for _, segment in segments do
+        if type(node) != "table" then return nil end
+        node = node[segment]
+        if node == nil then return nil end
+    end
+    if type(node) != "table" then return nil end
+    -- an endpoint is a table whose values are all handler functions
+    for _, handler in node do
+        if type(handler) != "function" then return nil end
+    end
+    return node
+end
+
+-- SERVER ---------------------------------------------------------------------
+
+http.serve({
+    port = config.port ?? 6767,
+    host = config.host ?? "127.0.0.1"
+}, function(req: Request)
+    local path, params = req:query()
+    local segments = string.split(path, "/")
+    table.remove(segments, 1) -- leading "/"
+    if segments[#segments] == "" then table.remove(segments) end -- trailing "/"
+
+    if segments[1] != "api" then
+        --return req:forward(3031)
+        return "placeholder index page"
+    end
+
+    local endpoint = resolve(segments)
+    if endpoint == nil then return fail(404, "not found") end
+
+    local handler = endpoint[req.method]
+    if handler == nil then
+        local allowed = {}
+        for method in endpoint do table.insert(allowed, method) end
+        table.sort(allowed)
+        return {
+            status = 405,
+            headers = { ["content-type"] = "application/json", ["allow"] = table.concat(allowed, ", ") },
+            body = json.encode({ ok = false, error = "method not allowed" })
+        }
+    end
+
+    local ok, input = try(readInput, req, params)
+    if not ok then return fail(400, "body must be valid json") end
+
+    return handler(req, input)
+end)
