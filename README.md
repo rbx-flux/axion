@@ -8,8 +8,9 @@ at [orbitroblox.xyz](https://orbitroblox.xyz).
 > **Branding notice.** The names *Axion*, *Orbit* and *Flux Studio*, and the
 > logos and other brand assets in this repository (including
 > `frontend/public/logo.png` and `frontend/public/favicon.png`), are the
-> property of Flux Studio. The source is public for reference, but no right to
-> the brand is granted. If you use, fork or deploy this code, rename the
+> property of Flux Studio. The code is MIT-licensed (see [LICENSE](LICENSE));
+> that licence covers the code only and grants no right to the brand. If you
+> use, fork or deploy this code, rename the
 > project and replace every name, logo, domain, link and legal text that
 > refers to Flux Studio or its products before publishing it.
 
@@ -75,13 +76,20 @@ telemetry.
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /api/v1/whitelist?creatorId=123[&licenseKey=…][&gameId=…]` | none | `{ ok, owned, licensed, keyValid, tester, creatorId, gameId, timestamp }`. `owned` is true when the user is licensed and the key (if sent) is theirs. `tester` is true for product testers. Failures raise alarms. |
-| `POST /api/v1/whitelist` `{ creatorId, licenseId, gameId, version }` | none | Same check and response as the GET form. `licenseId` and `licenseKey` are interchangeable; a `version`, when sent, is also recorded as telemetry. |
-| `POST /api/v1/telemetry` `{ creatorId, licenseKey, gameId, version }` | none | Records a ping; same checks and alarms as whitelist. |
-| `POST /api/v1/diagnostics` `{ creatorId, licenseKey, gameId, placeId, jobId, version, studio, reporterId, uptime, players, incidents[], log[] }` | none | A report from the in-game OrbitDebug popup ("Send Diagnostics") → `201 { id }`. Same licence checks and alarms as whitelist; stored either way and listed under Admin → Diagnostics. One per server (`jobId`) per minute: a repeat returns the earlier `id` with `duplicate: true`. Resolved reports are dropped after the telemetry retention window. |
+| `GET /api/v1/whitelist?creatorId=123&licenseKey=…[&gameId=…]` | key | `{ ok, owned, licensed, keyValid, tester, creatorId, gameId, timestamp }`. `owned` is true only when the user is licensed and the key is theirs. `tester` is true for product testers. Failures raise alarms. |
+| `POST /api/v1/whitelist` `{ creatorId, licenseId, gameId, version }` | key | Same check and response as the GET form. `licenseId` and `licenseKey` are interchangeable; a `version`, when sent, is also recorded as telemetry. |
+| `POST /api/v1/telemetry` `{ creatorId, licenseKey, gameId, version }` | key | Records a ping; same checks and alarms as whitelist. |
+| `POST /api/v1/diagnostics` `{ creatorId, licenseKey, gameId, placeId, jobId, version, studio, reporterId, uptime, players, incidents[], log[] }` | key | A report from the in-game OrbitDebug popup ("Send Diagnostics") → `201 { id }`. Same licence checks and alarms as whitelist; stored only when the key was actually issued (`401` otherwise) and listed under Admin → Diagnostics. One per server (`jobId`) per minute: a repeat returns the earlier `id` with `duplicate: true`. Resolved reports are dropped after the telemetry retention window. |
 | `POST /api/v1/licenses/issue` `{ creatorId }` | Bearer | Grant the product. Idempotent (`alreadyLicensed: true` on repeat). |
 | `POST /api/v1/keys/issue` `{ creatorId, rotate? }` | Bearer | Issue the user's build key → `201 { key, … }`. `404` if unlicensed, `409` if they already have one unless `rotate: true`. |
 | `GET /api/v1/keys/mismatches[?creatorId=123]` | Bearer | Open key-mismatch alarms, newest first (`count` = collapsed hits). |
+
+**key** endpoints need the build's licence key (`licenseKey` or `licenseId`);
+without one they answer `401` and store nothing. They are also rate-limited:
+120 requests a minute per client IP, and telemetry and diagnostics 60 a minute
+per key (the `ratelimits` bindings in `wrangler.jsonc`). Over the limit they
+answer `429`, which a build should treat as "try again later", not as
+unlicensed.
 
 Bearer endpoints need `Authorization: Bearer <API_SECRET>`. Parameters can be
 query-string or a JSON body (body wins). `gameId` is `game.GameId` (the
@@ -170,9 +178,12 @@ local VERSION = "3.2.0"
 -- the group, so put the licence holder's user id here instead.
 local CREATOR_ID = game.CreatorId
 
-local function isWhitelisted(): boolean
+local function isWhitelisted(): boolean?
     local url = `{BASE}/api/v1/whitelist?creatorId={CREATOR_ID}&licenseKey={BUILD_KEY}&gameId={game.GameId}`
-    local body = HttpService:GetAsync(url)
+    local ok, body = pcall(HttpService.GetAsync, HttpService, url)
+    if not ok then
+        return nil -- network error or 429: retry later rather than treating it as unlicensed
+    end
     return HttpService:JSONDecode(body).owned == true
 end
 
@@ -187,3 +198,9 @@ end
 ```
 
 Keep `API_SECRET` in a server Script only; never ship it to clients.
+
+## License
+
+The code is released under the [MIT License](LICENSE). The Axion, Orbit and
+Flux Studio names and brand assets are not covered by it; see the branding
+notice at the top.
