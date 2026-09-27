@@ -7,10 +7,10 @@
 // issued to.
 //
 // Script-facing (backend/src/routes/v1.ts):
-//   GET  /api/v1/whitelist?creatorId=123[&licenseKey=…][&gameId=…]   public
-//   POST /api/v1/whitelist  { creatorId, licenseId, gameId, version } public
-//   POST /api/v1/telemetry  { creatorId, licenseKey, gameId, version } public
-//   POST /api/v1/diagnostics { creatorId, licenseKey, incidents, log, … } public
+//   GET  /api/v1/whitelist?creatorId=123&licenseKey=…[&gameId=…]      licence key
+//   POST /api/v1/whitelist  { creatorId, licenseId, gameId, version } licence key
+//   POST /api/v1/telemetry  { creatorId, licenseKey, gameId, version } licence key
+//   POST /api/v1/diagnostics { creatorId, licenseKey, incidents, log, … } licence key
 //   POST /api/v1/licenses/issue  { creatorId }                        Bearer secret
 //   POST /api/v1/keys/issue      { creatorId, rotate? }               Bearer secret
 //   GET  /api/v1/keys/mismatches [?creatorId=123]                     Bearer secret

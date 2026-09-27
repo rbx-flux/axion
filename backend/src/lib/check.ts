@@ -56,5 +56,6 @@ export async function assess(
     await raiseAlarm(db, { kind: "unlicensed", level: "warn", creatorId, gameId });
   }
 
-  return { license, licensed, keyValid, owned: licensed && keyValid !== false };
+  // A build must present its own key; a licensed id alone is not enough.
+  return { license, licensed, keyValid, owned: licensed && keyValid === true };
 }

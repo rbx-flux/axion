@@ -36,6 +36,15 @@
   //   npx wrangler r2 bucket create axion-files
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "axion-files" }],
 
+  // Rate limits for the public /api/v1 endpoints (see backend/src/routes/v1.ts).
+  // RL_IP caps every public call per client IP; RL_KEY caps the writes
+  // (telemetry, diagnostics) per licence key. `period` must be 10 or 60.
+  // namespace_id is any integer unique to this account.
+  "ratelimits": [
+    { "name": "RL_IP", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } },
+    { "name": "RL_KEY", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }
+  ],
+
   // The Vite-built frontend. `directory` is filled in by the Cloudflare Vite
   // plugin at build time (it points at the client output under dist/). Only
   // /api/* invokes the Worker; everything else is served straight from the

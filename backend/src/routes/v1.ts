@@ -2,10 +2,9 @@
 // what an operator's tooling calls with the bearer secret.
 
 import { assess } from "../lib/check";
-import { assignKey, findLicense, grantLicense, log, recordTelemetry, type AlarmRow } from "../lib/db";
+import { assignKey, findLicense, findLicenseByKey, grantLicense, log, recordTelemetry, type AlarmRow } from "../lib/db";
 import {
   HttpError,
-  fail,
   normalizeKey,
   now,
   optionalId,
@@ -16,25 +15,46 @@ import {
 } from "../lib/http";
 import type { Handler, Router } from "../router";
 
+// The public endpoints below are what running builds call. Each one is
+// rate-limited per client IP, and needs the build's licence key: a request
+// without one is refused before anything is looked up or stored. Writes
+// (telemetry, diagnostics) are also rate-limited per key.
+
+function requireKey(input: Record<string, unknown>): string {
+  const raw = input.licenseKey ?? input.licenseId;
+  if (raw === undefined || raw === null || raw === "") throw new HttpError(401, "licenseKey is required");
+  const key = normalizeKey(raw);
+  if (key === null) throw new HttpError(400, "licenseKey must be a non-empty string");
+  return key;
+}
+
+async function limitIp(request: Request, env: Env): Promise<void> {
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const { success } = await env.RL_IP.limit({ key: ip });
+  if (!success) throw new HttpError(429, "too many requests; slow down");
+}
+
+async function limitKey(env: Env, key: string): Promise<void> {
+  const { success } = await env.RL_KEY.limit({ key });
+  if (!success) throw new HttpError(429, "too many requests for this licence key; slow down");
+}
+
 export function registerV1(router: Router): void {
   // Is this Roblox user licensed, and (when the build sends one) is the key it
   // carries the one issued to that user? `gameId` (game.GameId or
   // game.PlaceId, whichever the build sends) is optional and only used to
   // attribute alarms. Reachable as GET with query parameters or POST with a
   // json body; the key may be sent as `licenseKey` or, as newer builds do,
-  // `licenseId`. `tester` says whether the user is a product tester. A
+  // `licenseId`; it is required, and `owned` is only true when it is the
+  // one issued to `creatorId`. `tester` says whether the user is a product tester. A
   // `version` in the request is recorded as telemetry so the
   // admin view sees builds that only ever call this endpoint.
-  const whitelist: Handler = async ({ env, input }) => {
+  const whitelist: Handler = async ({ request, env, input }) => {
+    await limitIp(request, env);
     const creatorId = parseIdOrThrow(input.creatorId, "creatorId");
     const gameId = optionalId(input.gameId, "gameId");
     const version = optionalString(input.version, 40);
-    const rawKey = input.licenseKey ?? input.licenseId;
-    let key: string | null = null;
-    if (rawKey !== undefined && rawKey !== null && rawKey !== "") {
-      key = normalizeKey(rawKey);
-      if (key === null) return fail(400, "licenseKey must be a non-empty string");
-    }
+    const key = requireKey(input);
 
     const a = await assess(env.DB, creatorId, key, gameId);
     if (version !== null) {
@@ -64,16 +84,13 @@ export function registerV1(router: Router): void {
   // A running build reporting in: { creatorId, licenseKey, gameId, version }.
   // Stored for the admin telemetry view; failing checks raise the same alarms
   // as /whitelist.
-  router.post("/api/v1/telemetry", "none", async ({ env, input }) => {
+  router.post("/api/v1/telemetry", "none", async ({ request, env, input }) => {
+    await limitIp(request, env);
     const creatorId = parseIdOrThrow(input.creatorId, "creatorId");
     const gameId = optionalId(input.gameId, "gameId");
     const version = optionalString(input.version, 40);
-    const rawKey = input.licenseKey ?? input.licenseId;
-    let key: string | null = null;
-    if (rawKey !== undefined && rawKey !== null && rawKey !== "") {
-      key = normalizeKey(rawKey);
-      if (key === null) return fail(400, "licenseKey must be a non-empty string");
-    }
+    const key = requireKey(input);
+    await limitKey(env, key);
 
     const a = await assess(env.DB, creatorId, key, gameId);
     await recordTelemetry(env.DB, {
@@ -95,10 +112,12 @@ export function registerV1(router: Router): void {
   // `log` is Orbit's own log, `console` the server's whole output
   // (LogService history) and `context` a snapshot of versions, place/server,
   // extension status and probe state.
-  // The licence is assessed like /whitelist (and raises the same alarms), but
-  // a report is stored either way; the admin page shows whether it came from
-  // a licensed build. One report per server per minute.
-  router.post("/api/v1/diagnostics", "none", async ({ env, input }) => {
+  // The licence is assessed like /whitelist (and raises the same alarms). Only
+  // reports carrying a key that was actually issued are stored (a leaked
+  // build's report is kept, flagged as a bad key); anything else is refused.
+  // One report per server per minute.
+  router.post("/api/v1/diagnostics", "none", async ({ request, env, input }) => {
+    await limitIp(request, env);
     const creatorId = parseIdOrThrow(input.creatorId, "creatorId");
     const gameId = optionalId(input.gameId, "gameId");
     const placeId = optionalId(input.placeId, "placeId");
@@ -106,12 +125,9 @@ export function registerV1(router: Router): void {
     const jobId = optionalString(input.jobId, 64);
     const version = optionalString(input.version, 40);
     const studio = parseBool(input.studio);
-    const rawKey = input.licenseKey ?? input.licenseId;
-    let key: string | null = null;
-    if (rawKey !== undefined && rawKey !== null && rawKey !== "") {
-      key = normalizeKey(rawKey);
-      if (key === null) return fail(400, "licenseKey must be a non-empty string");
-    }
+    const key = requireKey(input);
+    if ((await findLicenseByKey(env.DB, key)) === null) throw new HttpError(401, "unknown licence key");
+    await limitKey(env, key);
 
     const incidents = parseIncidents(input.incidents);
     if (incidents.length === 0) throw new HttpError(400, "incidents must list at least one failure");
