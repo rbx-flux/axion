@@ -1,213 +1,119 @@
-// Placeholder frontend: exercises the public whitelist endpoint. The real
-// site goes here.
+// Layout and routes. The Worker serves index.html for every path it does
+// not know (`not_found_handling: "single-page-application"`), so unknown
+// paths land here and get the not-found view.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { loginUrl, useMe } from "./auth";
+import { Account } from "./pages/Account";
+import { Home } from "./pages/Home";
+import { Privacy, Terms } from "./pages/Legal";
+import { Login } from "./pages/Login";
+import { NotFound } from "./pages/NotFound";
+import { Admin } from "./pages/admin/Admin";
+import { Icon, Mark, Spinner } from "./ui";
 
-// The Worker serves index.html for every path it does not know
-// (`not_found_handling: "single-page-application"`), so unknown paths land
-// here and get the not-found view.
+export const DOCS_URL = "https://docs.orbitroblox.xyz";
+export const LICENSE_AGREEMENT_URL = "https://docs.orbitroblox.xyz/license-agreement";
+export const DISCORD_URL = "/discord";
+export const GITHUB_URL = "/github";
+
 export function App() {
-  const path = window.location.pathname;
   return (
-    <main className="wrap">
-      {path === "/" ? <Home /> : <NotFound />}
-    </main>
+    <div className="shell">
+      <Header />
+      <main className="page" id="main">
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/account" element={<Account />} />
+          <Route path="/terms" element={<Terms />} />
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/admin/*" element={<RequireAdmin />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </main>
+      <Footer />
+    </div>
   );
 }
 
-function Home() {
+function Header() {
+  const { me, loading } = useMe();
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => setOpen(false), [location]);
+
+  const user = me?.user ?? null;
   return (
-    <>
-      <header className="hero">
-        <p className="eyebrow">Placeholder frontend</p>
-        <h1>Axion</h1>
-        <p className="lede">
-          Licence server for the Roblox product. The real site goes here; for now this page
-          lets you poke the API.
-        </p>
-      </header>
-
-      <WhitelistCheck />
-      <Endpoints />
-
-      <footer className="foot">
-        <ApiStatus />
-      </footer>
-    </>
-  );
-}
-
-function NotFound() {
-  return (
-    <header className="hero">
-      <p className="eyebrow">404</p>
-      <h1>Nothing here</h1>
-      <p className="lede">
-        That page does not exist. <a href="/">Back to the start.</a>
-      </p>
+    <header className="topbar">
+      <div className="topbar-inner">
+        <Link to="/" className="brand" aria-label="Orbit home">
+          <Mark size={28} />
+          <span>Orbit</span>
+        </Link>
+        <button className="nav-toggle" aria-expanded={open} aria-controls="nav" onClick={() => setOpen((o) => !o)}>
+          <Icon name={open ? "x" : "menu"} size={18} />
+          <span className="sr-only">Menu</span>
+        </button>
+        <nav id="nav" className={`nav ${open ? "open" : ""}`} aria-label="Primary">
+          <a href={DOCS_URL} target="_blank" rel="noreferrer">
+            Docs <Icon name="external" size={12} />
+          </a>
+          <a href={DISCORD_URL} target="_blank" rel="noreferrer">
+            Discord
+          </a>
+          {user?.moderator && (
+            <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
+              {user.admin ? "Admin" : "Moderation"}
+            </NavLink>
+          )}
+          {loading ? null : user ? (
+            <NavLink to="/account" className={({ isActive }) => `nav-user ${isActive ? "active" : ""}`}>
+              {user.avatar ? <img src={user.avatar} alt="" width={20} height={20} /> : <Icon name="user" />}
+              <span>{user.username}</span>
+            </NavLink>
+          ) : (
+            <a href={loginUrl()} className="btn btn-primary btn-sm">
+              <Icon name="discord" />
+              <span>Sign in</span>
+            </a>
+          )}
+        </nav>
+      </div>
     </header>
   );
 }
 
-// The response shape of GET /api/v1/whitelist, or the error shape every
-// endpoint shares.
-interface WhitelistResult {
-  status: number;
-  body: { ok: boolean; owned?: boolean; error?: string } & Record<string, unknown>;
-}
-
-function WhitelistCheck() {
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<WhitelistResult | Error | null>(null);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const params = new URLSearchParams({ creatorId: String(data.get("creatorId")).trim() });
-    const licenseKey = String(data.get("licenseKey") ?? "").trim();
-    if (licenseKey) params.set("licenseKey", licenseKey);
-
-    setBusy(true);
-    try {
-      const response = await fetch(`/api/v1/whitelist?${params}`);
-      setResult({ status: response.status, body: await response.json() });
-    } catch (error) {
-      setResult(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  let state: "ok" | "bad" | "" = "";
-  let text = "…";
-  if (result instanceof Error) {
-    state = "bad";
-    text = `Request failed: ${result.message}`;
-  } else if (result !== null) {
-    state = result.status < 400 && result.body.owned ? "ok" : "bad";
-    text = `HTTP ${result.status}\n${JSON.stringify(result.body, null, 2)}`;
-  }
-
+function Footer() {
   return (
-    <section className="card">
-      <h2>Check a licence</h2>
-      <p className="hint">
-        Calls <code>GET /api/v1/whitelist</code>. Public, no secret needed.
-      </p>
-      <form className="form" onSubmit={submit}>
-        <label>
-          <span>Roblox user id</span>
-          <input name="creatorId" type="text" inputMode="numeric" placeholder="123456789" required />
-        </label>
-        <label>
-          <span>
-            Build key <em>(optional; a wrong one is recorded as a mismatch)</em>
-          </span>
-          <input
-            name="licenseKey"
-            type="text"
-            placeholder="AXION-XXXXX-XXXXX-XXXXX-XXXXX"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </label>
-        <button type="submit" disabled={busy}>
-          Check
-        </button>
-      </form>
-      {(busy || result !== null) && (
-        <pre className="result" data-state={busy ? "" : state}>
-          {busy ? "…" : text}
-        </pre>
-      )}
-    </section>
+    <footer className="footer">
+      <div className="footer-inner">
+        <p className="footer-brand">
+          <Mark size={16} /> Orbit · a flux studio product
+        </p>
+        <nav aria-label="Legal and links" className="footer-links">
+          <Link to="/terms">Terms of Service</Link>
+          <Link to="/privacy">Privacy Policy</Link>
+          <a href={LICENSE_AGREEMENT_URL} target="_blank" rel="noreferrer">
+            License Agreement
+          </a>
+          <a href={DOCS_URL} target="_blank" rel="noreferrer">
+            Documentation
+          </a>
+          <a href={GITHUB_URL} target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </footer>
   );
 }
 
-const ENDPOINTS = [
-  {
-    route: "GET /api/v1/whitelist",
-    auth: "none",
-    does: (
-      <>
-        Is <code>creatorId</code> licensed, and is <code>licenseKey</code> the key issued to them?
-      </>
-    ),
-  },
-  { route: "POST /api/v1/licenses/issue", auth: "Bearer", does: "Grant a user the product." },
-  {
-    route: "POST /api/v1/keys/issue",
-    auth: "Bearer",
-    does: (
-      <>
-        Issue the key for a user's build. One per user; <code>rotate</code> replaces it.
-      </>
-    ),
-  },
-  {
-    route: "GET /api/v1/keys/mismatches",
-    auth: "Bearer",
-    does: "Keys presented by someone they were not issued to — i.e. leaked builds.",
-  },
-];
-
-function Endpoints() {
-  return (
-    <section className="card">
-      <h2>Endpoints</h2>
-      <table className="endpoints">
-        <thead>
-          <tr>
-            <th>Route</th>
-            <th>Auth</th>
-            <th>Does</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ENDPOINTS.map((endpoint) => (
-            <tr key={endpoint.route}>
-              <td>
-                <code>{endpoint.route}</code>
-              </td>
-              <td>{endpoint.auth}</td>
-              <td>{endpoint.does}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
-  );
-}
-
-// Reachability probe: a 400 (missing creatorId) still proves the API is up.
-function ApiStatus() {
-  const [status, setStatus] = useState<{ state: "" | "ok" | "bad"; text: string }>({
-    state: "",
-    text: "Checking API…",
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/v1/whitelist")
-      .then((response) => {
-        if (cancelled) return;
-        const up = response.status === 400;
-        setStatus({
-          state: up ? "ok" : "bad",
-          text: up ? "API reachable" : `API returned HTTP ${response.status}`,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setStatus({ state: "bad", text: "API unreachable" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return (
-    <span className="status" data-state={status.state} aria-live="polite">
-      {status.text}
-    </span>
-  );
+function RequireAdmin() {
+  const { me, loading } = useMe();
+  if (loading) return <Spinner />;
+  if (!me?.user) return <Navigate to={`/login?next=${encodeURIComponent("/admin")}`} replace />;
+  if (!me.user.moderator) return <NotFound />;
+  return <Admin admin={me.user.admin} />;
 }

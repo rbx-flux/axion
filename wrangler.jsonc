@@ -11,6 +11,11 @@
   // itself. The *.workers.dev URL keeps working alongside it.
   "routes": [{ "pattern": "orbitroblox.xyz", "custom_domain": true }],
 
+  // Daily housekeeping (04:00 UTC): drops info-level log entries older than
+  // a day and telemetry past its retention window. See `scheduled` in
+  // backend/src/index.ts.
+  "triggers": { "crons": ["0 4 * * *"] },
+
   // The licence database. Create it once with
   //   npx wrangler d1 create axion
   // and paste the returned database_id below. `vite dev` uses a local
@@ -25,6 +30,11 @@
       "migrations_dir": "backend/migrations"
     }
   ],
+
+  // Uploaded .rbxmx releases and the per-user obfuscated builds made from
+  // them. Create once with
+  //   npx wrangler r2 bucket create axion-files
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "axion-files" }],
 
   // The Vite-built frontend. `directory` is filled in by the Cloudflare Vite
   // plugin at build time (it points at the client output under dist/). Only

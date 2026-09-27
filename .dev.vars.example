@@ -1,3 +1,17 @@
-# Copy to .dev.vars for `wrangler dev`. In production set it with:
-#   npx wrangler secret put API_SECRET
+# Copy to .dev.vars for `npm run dev`. In production set each one with
+#   npx wrangler secret put <NAME>
+
+# Bearer token for the script-facing /api/v1/licenses/issue, /api/v1/keys/*
+# endpoints. 16+ characters.
 API_SECRET=change-me-to-a-long-random-secret
+
+# Signs session cookies and OAuth state. 32+ random characters; rotating it
+# logs everyone out.
+SESSION_SECRET=change-me-to-a-different-long-random-secret
+
+# Discord application (https://discord.com/developers/applications). Add
+# <origin>/api/auth/discord/callback as a redirect URI, e.g.
+#   http://localhost:5173/api/auth/discord/callback      (dev)
+#   https://orbitroblox.xyz/api/auth/discord/callback    (production)
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=

@@ -3,4 +3,7 @@
 // the generated worker-configuration.d.ts.
 interface Env {
   API_SECRET: string;
+  SESSION_SECRET: string;
+  DISCORD_CLIENT_ID: string;
+  DISCORD_CLIENT_SECRET: string;
 }
