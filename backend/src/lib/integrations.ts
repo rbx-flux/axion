@@ -94,10 +94,10 @@ export async function parcelOwns(settings: Settings, robloxId: number): Promise<
 // NYXYL / UMBRA --------------------------------------------------------------
 //
 // POST https://nyxyl.dev/api/obfuscate  Authorization: Bearer <key>
-//   { source, options: { mode: "vm" | "ast" | "minify", ... } }
+//   { source, options: { mode: "vm" | "register" | "minify", ... } }
 //   → 200 { obfuscated, bytes, mode }
 
-export type ObfuscateMode = "vm" | "ast" | "minify";
+export type ObfuscateMode = "vm" | "register" | "minify";
 
 export async function obfuscate(settings: Settings, source: string): Promise<string> {
   if (settings.nyxyl_api_key === "") throw new HttpError(503, "the obfuscator API key is not set");
@@ -161,7 +161,7 @@ export async function obfuscateBound(
   source: string,
   principalId: string,
 ): Promise<string> {
-  const mode = settings.obfuscate_mode === "none" ? "ast" : settings.obfuscate_mode;
+  const mode = settings.obfuscate_mode === "none" ? "register" : settings.obfuscate_mode;
   const response = await fetch("https://nyxyl.dev/api/builds", {
     method: "POST",
     headers: nyxylHeaders(settings),

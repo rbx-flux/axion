@@ -193,7 +193,7 @@ export const SETTING_DEFAULTS = {
   parcel_hub_id: "",
   parcel_product_id: "",
   nyxyl_api_key: "",
-  obfuscate_mode: "vm", // vm | ast | minify | none
+  obfuscate_mode: "vm", // vm | register | minify | none  ("ast" accepted as a legacy alias)
   obfuscate_scope: "marked", // marked (scripts containing the marker) | all
   key_marker: "__LICENSE_KEY",
   // When "true", scripts are obfuscated as nyxyl SERVER-BOUND builds tied to a

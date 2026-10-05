@@ -89,7 +89,7 @@ export function Settings() {
             <Field label="Mode">
               <select value={form.obfuscate_mode ?? "vm"} onChange={set("obfuscate_mode")}>
                 <option value="vm">vm — bytecode virtualisation (strongest)</option>
-                <option value="ast">ast — source-level transforms</option>
+                <option value="register">register — Register VM</option>
                 <option value="minify">minify — rename and compress only</option>
                 <option value="none">none — key substitution only, no obfuscation</option>
               </select>

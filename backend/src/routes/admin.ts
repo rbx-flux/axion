@@ -648,7 +648,7 @@ function parseChannel(value: unknown, fallback: Channel): Channel {
 }
 
 function validateSettings(s: Settings): void {
-  if (!["vm", "ast", "minify", "none"].includes(s.obfuscate_mode)) throw new HttpError(400, "obfuscate_mode must be vm, ast, minify or none");
+  if (!["vm", "register", "ast", "minify", "none"].includes(s.obfuscate_mode)) throw new HttpError(400, "obfuscate_mode must be vm, register, minify or none");
   if (!["marked", "all"].includes(s.obfuscate_scope)) throw new HttpError(400, "obfuscate_scope must be marked or all");
   if (s.key_marker.length < 4) throw new HttpError(400, "key_marker should be at least 4 characters");
   const days = Number(s.telemetry_retention_days);
