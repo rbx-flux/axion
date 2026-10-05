@@ -118,3 +118,103 @@ export async function obfuscate(settings: Settings, source: string): Promise<str
   }
   return body.obfuscated;
 }
+
+// Server binding (shared principals) -----------------------------------------
+//
+// A "principal" is nyxyl's shared, revocable key: one secret for a whole fleet of
+// builds. We keep exactly one per licensee (keyed by their Roblox id), so every
+// server-bound script we mint for that user folds the SAME secret and revoking the
+// principal kills them all at once. See nyxyl-dev migrations/010_principals.sql.
+
+function nyxylHeaders(settings: Settings): HeadersInit {
+  if (settings.nyxyl_api_key === "") throw new HttpError(503, "the obfuscator API key is not set");
+  return { authorization: `Bearer ${settings.nyxyl_api_key}`, "content-type": "application/json" };
+}
+
+// Create-or-get the principal for a Roblox user. Idempotent on externalRef, so it is
+// safe to call on every download; returns the principal id to store on the licence.
+export async function ensurePrincipal(settings: Settings, robloxId: number): Promise<string> {
+  const response = await fetch("https://nyxyl.dev/api/principals", {
+    method: "POST",
+    headers: nyxylHeaders(settings),
+    body: JSON.stringify({ externalRef: `roblox:${robloxId}`, label: `orbit:${robloxId}` }),
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    principal?: { id?: string };
+    error?: string;
+  };
+  if (!response.ok || typeof body.principal?.id !== "string") {
+    throw new HttpError(
+      502,
+      `principal create failed (HTTP ${response.status})${body.error ? `: ${body.error}` : ""}`,
+    );
+  }
+  return body.principal.id;
+}
+
+// Obfuscate a single script as a server-bound build under `principalId`. The returned
+// artifact fetches its key from nyxyl at runtime (the key is not in the file) and is
+// inert if the principal is revoked. Same string-in/string-out shape as obfuscate(),
+// so it drops into the rbxmx transform in its place.
+export async function obfuscateBound(
+  settings: Settings,
+  source: string,
+  principalId: string,
+): Promise<string> {
+  const mode = settings.obfuscate_mode === "none" ? "ast" : settings.obfuscate_mode;
+  const response = await fetch("https://nyxyl.dev/api/builds", {
+    method: "POST",
+    headers: nyxylHeaders(settings),
+    body: JSON.stringify({
+      source,
+      options: { mode, keyBinding: "server" },
+      principalId,
+    }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { artifact?: string; error?: string };
+  if (!response.ok || typeof body.artifact !== "string") {
+    throw new HttpError(
+      502,
+      `bound obfuscate failed (HTTP ${response.status})${body.error ? `: ${body.error}` : ""}`,
+    );
+  }
+  return body.artifact;
+}
+
+// Rotate a licensee's principal secret — every build minted against the OLD secret
+// (including copies already downloaded) can no longer decrypt, so rotation is the
+// cryptographic counterpart to issuing a fresh whitelist key.
+export async function rotatePrincipal(settings: Settings, principalId: string): Promise<void> {
+  const response = await fetch(`https://nyxyl.dev/api/principals/${principalId}/rotate`, {
+    method: "POST",
+    headers: nyxylHeaders(settings),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new HttpError(
+      502,
+      `principal rotate failed (HTTP ${response.status})${body.error ? `: ${body.error}` : ""}`,
+    );
+  }
+}
+
+// Revoke a licensee's principal — kills every build they ever downloaded in one call.
+// `restore` re-enables delivery (revoke is a reversible pause on nyxyl).
+export async function setPrincipalRevoked(
+  settings: Settings,
+  principalId: string,
+  revoked: boolean,
+): Promise<void> {
+  const action = revoked ? "revoke" : "restore";
+  const response = await fetch(`https://nyxyl.dev/api/principals/${principalId}/${action}`, {
+    method: "POST",
+    headers: nyxylHeaders(settings),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new HttpError(
+      502,
+      `principal ${action} failed (HTTP ${response.status})${body.error ? `: ${body.error}` : ""}`,
+    );
+  }
+}

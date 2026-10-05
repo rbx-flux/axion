@@ -36,7 +36,14 @@ import {
   type UserRow,
 } from "../lib/db";
 import { HttpError, now, origin, randomToken, readCookie, redirect, reply } from "../lib/http";
-import { bloxlinkLookup, obfuscate, parcelOwns, robloxUsername } from "../lib/integrations";
+import {
+  bloxlinkLookup,
+  ensurePrincipal,
+  obfuscate,
+  obfuscateBound,
+  parcelOwns,
+  robloxUsername,
+} from "../lib/integrations";
 import { transformRbxmx } from "../lib/rbxmx";
 import type { Router } from "../router";
 
@@ -204,7 +211,7 @@ export function registerAccount(router: Router): void {
       object = await build(env, file, license, key, u);
     }
 
-    await log(env.DB, "info", "download", u.discord_id, `${u.roblox_id} downloaded ${file.name}${file.channel === "tester" ? " (tester build)" : ""}`, {
+    await log(env.DB, "info", "download", u.discord_id, `${u.roblox_id} downloaded ${file.name}${file.channel === "release" ? "" : ` (${file.channel} build)`}`, {
       robloxId: u.roblox_id,
       fileId: file.id,
       channel: file.channel,
@@ -263,7 +270,30 @@ async function build(
   const source = await env.FILES.get(file.r2_key);
   if (source === null) throw new HttpError(500, "the release file is missing from storage");
   const settings = await loadSettings(env.DB);
-  const obfuscator = settings.obfuscate_mode === "none" ? null : (s: string) => obfuscate(settings, s);
+
+  // Pick the obfuscator. Server binding (shared principals) turns each script into a
+  // nyxyl server-bound build whose key is NOT in the file; a plain build just obfuscates.
+  // The marker is still swapped for the plaintext key in both cases, so the whitelist
+  // RPC keeps working as the identity/leak-attribution layer on top of the crypto gate.
+  let obfuscator: ((s: string) => Promise<string>) | null;
+  if (settings.nyxyl_server_bind === "true" && settings.obfuscate_mode !== "none") {
+    // One principal per licensee, created on first server-bound download and reused
+    // thereafter so every build the user has folds the same shared secret.
+    let principalId = license.principal_id;
+    if (principalId === null) {
+      principalId = await ensurePrincipal(settings, license.creator_id);
+      await env.DB.prepare("UPDATE licenses SET principal_id = ?1 WHERE creator_id = ?2")
+        .bind(principalId, license.creator_id)
+        .run();
+      await log(env.DB, "info", "principal.create", user.discord_id, `nyxyl principal for ${license.creator_id}`, {
+        robloxId: license.creator_id,
+      });
+    }
+    const pid = principalId;
+    obfuscator = (s: string) => obfuscateBound(settings, s, pid);
+  } else {
+    obfuscator = settings.obfuscate_mode === "none" ? null : (s: string) => obfuscate(settings, s);
+  }
 
   const started = Date.now();
   const result = await transformRbxmx(await source.text(), {

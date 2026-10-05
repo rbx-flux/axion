@@ -15,10 +15,13 @@ export interface LicenseRow {
   tester: number;
   tester_since: number | null;
   tester_by: string | null;
+  // nyxyl principal for this user's server-bound builds; NULL until first server-bound
+  // download (and always NULL while server binding is off).
+  principal_id: string | null;
 }
 
 const LICENSE_SELECT =
-  "SELECT creator_id, key, licensed_at, key_issued_at, source, issued_by, tester, tester_since, tester_by FROM licenses";
+  "SELECT creator_id, key, licensed_at, key_issued_at, source, issued_by, tester, tester_since, tester_by, principal_id FROM licenses";
 
 export function findLicense(db: D1Database, creatorId: number): Promise<LicenseRow | null> {
   return db.prepare(`${LICENSE_SELECT} WHERE creator_id = ?1`).bind(creatorId).first<LicenseRow>();
@@ -55,6 +58,7 @@ export async function grantLicense(
       tester: 0,
       tester_since: null,
       tester_by: null,
+      principal_id: null,
     },
     created: true,
   };
@@ -192,6 +196,11 @@ export const SETTING_DEFAULTS = {
   obfuscate_mode: "vm", // vm | ast | minify | none
   obfuscate_scope: "marked", // marked (scripts containing the marker) | all
   key_marker: "__LICENSE_KEY",
+  // When "true", scripts are obfuscated as nyxyl SERVER-BOUND builds tied to a
+  // per-user principal (the decryption key lives on nyxyl, not in the file) instead
+  // of a plain obfuscation. One principal per licensee; revoking the licence revokes
+  // the principal, which kills every build that user ever downloaded at once.
+  nyxyl_server_bind: "false",
   telemetry_retention_days: "30",
 } as const;
 
@@ -235,9 +244,11 @@ export async function saveSettings(
 
 // FILES / BUILDS -------------------------------------------------------------
 
-// `release` files are the production builds every licensee gets; `tester`
-// files are non-production builds only product testers (and admins) see.
-export const CHANNELS = ["release", "tester"] as const;
+// `release` files are the production builds every licensee gets; `beta`
+// files are the public beta, also offered to every licensee but kept apart
+// from production; `tester` files are non-production builds only product
+// testers (and admins) see.
+export const CHANNELS = ["release", "beta", "tester"] as const;
 export type Channel = (typeof CHANNELS)[number];
 
 export function isChannel(value: unknown): value is Channel {
@@ -275,12 +286,12 @@ export async function listFiles(db: D1Database): Promise<FileRow[]> {
   return (await db.prepare("SELECT * FROM files ORDER BY uploaded_at DESC").all<FileRow>()).results;
 }
 
-// What a licensee is offered: published production releases, plus published
-// tester releases when they are a product tester.
+// What a licensee is offered: published production and public beta
+// releases, plus published tester releases when they are a product tester.
 export async function listPublishedFiles(db: D1Database, tester: boolean): Promise<FileRow[]> {
   const sql = tester
     ? "SELECT * FROM files WHERE published = 1 ORDER BY uploaded_at DESC"
-    : "SELECT * FROM files WHERE published = 1 AND channel = 'release' ORDER BY uploaded_at DESC";
+    : "SELECT * FROM files WHERE published = 1 AND channel != 'tester' ORDER BY uploaded_at DESC";
   return (await db.prepare(sql).all<FileRow>()).results;
 }
 

@@ -28,9 +28,12 @@ import {
 } from "../lib/db";
 import { HttpError, now, optionalId, optionalString, parseBool, parseId, parseIdOrThrow, parseString, randomToken, reply } from "../lib/http";
 import { countMarkedScripts, isRbxmx } from "../lib/rbxmx";
+import { rotatePrincipal, setPrincipalRevoked } from "../lib/integrations";
 import { isAdmin } from "../lib/auth";
 import type { Router } from "../router";
 import { presentFile, presentLicense, presentUser } from "./account";
+
+const CHANNEL_NAMES: Record<Channel, string> = { release: "production", beta: "the public beta", tester: "testers" };
 
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const LEVELS: Level[] = ["info", "warn", "error"];
@@ -89,7 +92,7 @@ export function registerAdmin(router: Router): void {
   });
 
   // multipart/form-data: file (.rbxmx), name?, version?, notes?, published?,
-  // channel? (release | tester, default release)
+  // channel? (release | beta | tester, default release)
   router.post("/api/admin/files", "admin", async ({ request, env, user }) => {
     const form = await request.formData().catch(() => null);
     if (form === null) throw new HttpError(400, "expected multipart form data");
@@ -121,7 +124,7 @@ export function registerAdmin(router: Router): void {
     )
       .bind(id, name, version, notes, upload.size, r2Key, markerHits, published ? 1 : 0, channel, now(), actor(user))
       .run();
-    await log(env.DB, markerHits === 0 ? "warn" : "info", "file.upload", actor(user), `uploaded ${name}${version ? ` ${version}` : ""}${channel === "tester" ? " for testers" : ""} (${markerHits} script(s) carry ${marker})`, {
+    await log(env.DB, markerHits === 0 ? "warn" : "info", "file.upload", actor(user), `uploaded ${name}${version ? ` ${version}` : ""}${channel === "release" ? "" : ` to ${CHANNEL_NAMES[channel]}`} (${markerHits} script(s) carry ${marker})`, {
       fileId: id,
       size: upload.size,
       markerHits,
@@ -148,7 +151,7 @@ export function registerAdmin(router: Router): void {
       });
     }
     if (channel !== file.channel) {
-      await log(env.DB, "info", "file.channel", actor(user), `moved ${name} to the ${channel === "tester" ? "tester" : "production"} channel`, {
+      await log(env.DB, "info", "file.channel", actor(user), `moved ${name} to ${CHANNEL_NAMES[channel]}`, {
         fileId: file.id,
         channel,
       });
@@ -401,6 +404,18 @@ export function registerAdmin(router: Router): void {
       env.DB.prepare("DELETE FROM builds WHERE creator_id = ?1").bind(creatorId),
       env.DB.prepare("DELETE FROM licenses WHERE creator_id = ?1").bind(creatorId),
     ]);
+    // Kill the user's whole server-bound fleet on nyxyl in one call. Best-effort: the
+    // local revoke already stands, so a nyxyl hiccup must not fail the request.
+    if (license.principal_id !== null) {
+      try {
+        await setPrincipalRevoked(await loadSettings(env.DB), license.principal_id, true);
+      } catch (err) {
+        await log(env.DB, "error", "principal.revoke.fail", actor(user), `nyxyl revoke failed for ${creatorId}`, {
+          creatorId,
+          error: String(err),
+        });
+      }
+    }
     await log(env.DB, "warn", "license.revoke", actor(user), `revoked ${creatorId}`, { creatorId });
     return reply(200, { ok: true });
   });
@@ -420,6 +435,19 @@ export function registerAdmin(router: Router): void {
         .all<{ r2_key: string }>();
       if (builds.length > 0) await env.FILES.delete(builds.map((b) => b.r2_key));
       await env.DB.prepare("DELETE FROM builds WHERE creator_id = ?1").bind(creatorId).run();
+      // Rotate the principal too, so server-bound copies already in the wild (minted
+      // against the old secret) can no longer decrypt — the crypto counterpart to the
+      // new whitelist key. Best-effort; the local key change already stands.
+      if (license.principal_id !== null) {
+        try {
+          await rotatePrincipal(await loadSettings(env.DB), license.principal_id);
+        } catch (err) {
+          await log(env.DB, "error", "principal.rotate.fail", actor(user), `nyxyl rotate failed for ${creatorId}`, {
+            creatorId,
+            error: String(err),
+          });
+        }
+      }
     }
     await log(env.DB, "info", license.key !== null ? "key.rotate" : "key.issue", actor(user), `key for ${creatorId}`, { creatorId });
     return reply(201, { ok: true, creatorId, key, rotated: license.key !== null });
@@ -552,7 +580,10 @@ export function registerAdmin(router: Router): void {
       env.DB.prepare("UPDATE alarms SET cleared_at = ?1, cleared_by = ?2 WHERE kind = 'deletion_request' AND cleared_at IS NULL AND detail LIKE ?3")
         .bind(now(), actor(user), `%"discordId":"${target.discord_id}"%`),
     ];
+    let revokePrincipalId: string | null = null;
     if (withLicense) {
+      const priorLicense = await findLicense(env.DB, target.roblox_id as number);
+      revokePrincipalId = priorLicense?.principal_id ?? null;
       const { results: builds } = await env.DB.prepare("SELECT r2_key FROM builds WHERE creator_id = ?1")
         .bind(target.roblox_id)
         .all<{ r2_key: string }>();
@@ -564,6 +595,17 @@ export function registerAdmin(router: Router): void {
       );
     }
     await env.DB.batch(statements);
+    // Kill the deleted user's server-bound fleet on nyxyl (best-effort).
+    if (revokePrincipalId !== null) {
+      try {
+        await setPrincipalRevoked(await loadSettings(env.DB), revokePrincipalId, true);
+      } catch (err) {
+        await log(env.DB, "error", "principal.revoke.fail", actor(user), `nyxyl revoke failed for ${target.roblox_id}`, {
+          robloxId: target.roblox_id,
+          error: String(err),
+        });
+      }
+    }
     await log(env.DB, "warn", "user.delete", actor(user), `deleted ${target.discord_username} (${target.discord_id})${withLicense ? " including licence and telemetry" : ""}`, {
       discordId: target.discord_id,
       robloxId: target.roblox_id,
@@ -601,7 +643,7 @@ export function registerAdmin(router: Router): void {
 
 function parseChannel(value: unknown, fallback: Channel): Channel {
   if (value === undefined || value === null || value === "") return fallback;
-  if (!isChannel(value)) throw new HttpError(400, "channel must be release or tester");
+  if (!isChannel(value)) throw new HttpError(400, "channel must be release, beta or tester");
   return value;
 }
 
